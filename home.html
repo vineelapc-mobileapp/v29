@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>EEE Practice</title>
+<meta name="theme-color" content="#16274A">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
+  background-color:#EAF1F6;
+  background-image:
+    linear-gradient(rgba(22,39,74,0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(22,39,74,0.045) 1px, transparent 1px);
+  background-size:22px 22px;
+  color:#16213A;min-height:100vh;
+  display:flex;align-items:center;justify-content:center;padding:20px;
+}
+.wrap{text-align:center;max-width:420px;width:100%;}
+h1{font-size:26px;margin-bottom:6px;color:#16274A;cursor:default;user-select:none;font-weight:700;letter-spacing:0.2px;}
+p{color:#64748B;margin-bottom:32px;font-size:14px;}
+.choice{
+  background:#fff;border:2px solid #16274A;border-top:3px solid #C97A2B;border-radius:16px;padding:22px;
+  cursor:pointer;display:flex;align-items:center;gap:16px;text-align:left;
+  box-shadow:0 2px 8px rgba(22,39,74,0.1);
+}
+.choice:active{transform:scale(0.98);}
+.choice img{width:52px;height:52px;border-radius:12px;flex-shrink:0;}
+.choice .title{font-weight:700;font-size:17px;margin-bottom:2px;color:#16213A;}
+.choice .sub{font-size:12px;color:#64748B;}
+.footer-tap{margin-top:40px;font-size:11px;color:#B8C4D6;user-select:none;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 id="titleTap">EEE Practice</h1>
+  <p>Power Systems &amp; Electrical / Electronic Measurements<br><span style="font-size:12px;color:#9aa1b5;">Both subjects by BALAJI sir</span></p>
+  <div class="choice" onclick="window.location.href='index.html'">
+    <img src="icons/icon-192.png" alt="Student">
+    <div>
+      <div class="title">Start Practice</div>
+      <div class="sub">Attempt questions, get instant feedback</div>
+    </div>
+  </div>
+  <div class="footer-tap">v15</div>
+</div>
+<script>
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+  navigator.serviceWorker.register('service-worker.js').catch(() => {});
+}
+// Teacher access is intentionally not shown as a button.
+// Tap the "EEE Practice" title 5 times within 3 seconds to reveal it.
+let taps = 0, tapTimer = null;
+document.getElementById('titleTap').addEventListener('click', () => {
+  taps++;
+  clearTimeout(tapTimer);
+  tapTimer = setTimeout(() => { taps = 0; }, 3000);
+  if (taps >= 5) {
+    taps = 0;
+    window.location.href = 'upload.html';
+  }
+});
+</script>
+</body>
+</html>
