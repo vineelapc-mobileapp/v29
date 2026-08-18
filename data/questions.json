@@ -68,7 +68,27 @@
           "id": "transmission_line_performance",
           "name": "Transmission Line Performance",
           "levels": {
-            "1": [],
+            "1": [
+              {
+                "id": "transmission_line_performance_l1_new1787029660299_0",
+                "type": "mcq",
+                "question": "The geometric mean radius (GMR) of a solid conductor of radius r is           (A)   (A)  r",
+                "questionImage": null,
+                "options": [
+                  "r",
+                  "0.5r",
+                  "0.7788r",
+                  "1.414r"
+                ],
+                "correctIndex": 2,
+                "correctAnswer": "",
+                "videoUrl": "https://www.youtube.com/watch?v=yFBSD3BpgaE&t=1530s",
+                "videoFile": null,
+                "videoReady": true,
+                "explanation": "r' = 0.7788 r is the effective radius",
+                "explanationImage": null
+              }
+            ],
             "2": []
           }
         },
