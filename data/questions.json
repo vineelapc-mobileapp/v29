@@ -57,7 +57,7 @@
                 "correctAnswer": "",
                 "videoUrl": "https://www.youtube.com/watch?v=yFBSD3BpgaE&t=1530s",
                 "videoFile": null,
-                "videoReady": true,
+                "videoReady": false,
                 "explanation": "L α ln (d)",
                 "explanationImage": null
               }
