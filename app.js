@@ -499,10 +499,12 @@ function renderWrongAnswerPanel(q, cardEl){
     ? `<img src="${q.explanationImage}" alt="Explanation" class="explanation-image">`
     : '';
   const videoLinkHtml = hasVideo(q) ? '<span class="video-link">Watch Video Solution</span>' : '';
+  const audioHtml = q.audioFile ? `<audio controls class="audio-explanation" src="${q.audioFile}"></audio>` : '';
   panel.innerHTML = `
     <div class="wrong-panel-label">&#10007; Not quite - here's why the correct answer is right</div>
     ${imageHtml}
     <p class="explanation-text">${explanationText}</p>
+    ${audioHtml}
     ${videoLinkHtml}
   `;
   const videoLinkEl = panel.querySelector('.video-link');
@@ -555,6 +557,7 @@ function renderCorrectAnswerPanel(q, cardEl){
   body.innerHTML = `
     ${imageHtml}
     <p class="explanation-text">${explanationText}</p>
+    ${q.audioFile ? `<audio controls class="audio-explanation" src="${q.audioFile}"></audio>` : ''}
     ${hasVideo(q) ? '<span class="video-link">Watch Video Solution</span>' : ''}
   `;
   const videoLinkEl = body.querySelector('.video-link');
