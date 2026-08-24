@@ -37,7 +37,27 @@
           "id": "economic_factors",
           "name": "Economic Factors",
           "levels": {
-            "1": [],
+            "1": [
+              {
+                "id": "economic_factors_l1_new1787599095577_0",
+                "type": "mcq",
+                "question": "The daily energy produced in a thermal power station is 720 MWh at a load factor of 0.6. What is the maximum demand of the station?",
+                "questionImage": null,
+                "options": [
+                  "50 MW",
+                  "30 MW",
+                  "72MW",
+                  "720 Mw"
+                ],
+                "correctIndex": 0,
+                "correctAnswer": "",
+                "videoUrl": "PASTE_VIDEO_LINK_HERE",
+                "videoFile": null,
+                "videoReady": false,
+                "explanation": "Plf = Pvag/Pmax\n  0.6 = (720/24)/Pmax\nPmax = 50 MW ",
+                "explanationImage": null
+              }
+            ],
             "2": []
           }
         },
