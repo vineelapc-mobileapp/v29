@@ -8,6 +8,8 @@ const subtopicSelect = document.getElementById('subtopicSelect');
 const levelSelect = document.getElementById('levelSelect');
 const cameraBtn = document.getElementById('cameraBtn');
 const filesBtn = document.getElementById('filesBtn');
+const dictateBtn = document.getElementById('dictateBtn');
+const dictateBtnLabel = document.getElementById('dictateBtnLabel');
 const cameraInput = document.getElementById('cameraInput');
 const filesInput = document.getElementById('filesInput');
 const statusLine = document.getElementById('statusLine');
@@ -125,7 +127,106 @@ function renderVerifyTab(){
       <br>Question bank file size: <strong style="color:${sizeColor};">${sizeMB.toFixed(2)} MB</strong>${sizeWarning}
     </div>
   `;
+  if (sizeBytes > 300000) {
+    const reportBtn = document.createElement('button');
+    reportBtn.className = 'btn btn-secondary full-width';
+    reportBtn.style.marginTop = '10px';
+    reportBtn.textContent = '🔍 Show Storage Report - find the heaviest questions';
+    reportBtn.onclick = () => renderStorageReport();
+    overview.appendChild(reportBtn);
+  }
   verifySummary.insertBefore(overview, verifySummary.firstChild);
+}
+
+// Sorts every question across every subject/subtopic by its embedded size
+// (uploaded video + images), biggest first - the fastest way to find what's
+// actually causing a large file, rather than checking topic-by-topic.
+function renderStorageReport(){
+  const rows = [];
+  DATA.subjects.forEach(subj => {
+    subj.subtopics.forEach(subt => {
+      ['1', '2'].forEach(level => {
+        (subt.levels[level] || []).forEach(q => {
+          const videoSize = q.videoFile ? new Blob([q.videoFile]).size : 0;
+          const qImgSize = q.questionImage ? new Blob([q.questionImage]).size : 0;
+          const explImgSize = q.explanationImage ? new Blob([q.explanationImage]).size : 0;
+          const total = videoSize + qImgSize + explImgSize;
+          if (total > 0) rows.push({ subj, subt, level, q, videoSize, qImgSize, explImgSize, total });
+        });
+      });
+    });
+  });
+  rows.sort((a, b) => b.total - a.total);
+
+  verifyDetail.dataset.openFor = '__storage_report__';
+  verifyDetail.innerHTML = '';
+  const header = document.createElement('div');
+  header.className = 'settings-panel';
+  header.innerHTML = `<h3>Storage Report</h3><div class="hint" style="margin-bottom:0;">${rows.length} question(s) with attached media, heaviest first. Remove or replace with a Link to shrink the file fast.</div>`;
+  verifyDetail.appendChild(header);
+
+  if (rows.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'progress-note';
+    empty.textContent = 'No attached media found.';
+    verifyDetail.appendChild(empty);
+    return;
+  }
+
+  rows.forEach(r => {
+    const box = document.createElement('div');
+    box.className = 'qblock';
+    const mb = b => (b / (1024 * 1024)).toFixed(2);
+    const parts = [];
+    if (r.videoSize) parts.push(`🎬 Uploaded video: ${mb(r.videoSize)} MB`);
+    if (r.qImgSize) parts.push(`🖼 Question figure: ${mb(r.qImgSize)} MB`);
+    if (r.explImgSize) parts.push(`📎 Explanation image: ${mb(r.explImgSize)} MB`);
+    box.innerHTML = `
+      <span class="row-label">${r.subj.name} → ${r.subt.name} (Level ${r.level}) — <strong style="color:var(--wrong);">${mb(r.total)} MB</strong></span>
+      <div style="font-weight:600;margin-bottom:8px;">${r.q.question.slice(0, 100)}${r.q.question.length > 100 ? '…' : ''}</div>
+      <div style="font-size:13px;color:var(--muted);margin-bottom:10px;">${parts.join('<br>')}</div>
+    `;
+    if (r.videoSize) {
+      const rmVideoBtn = document.createElement('button');
+      rmVideoBtn.className = 'remove-q';
+      rmVideoBtn.textContent = 'Remove this uploaded video (' + mb(r.videoSize) + ' MB)';
+      rmVideoBtn.onclick = () => {
+        r.q.videoFile = null;
+        pendingTopicChanges = true;
+        saveDraft();
+        renderStorageReport();
+        setStatus('Removed uploaded video. Consider pasting a YouTube/Drive link instead - it barely adds any size.', 'ok');
+      };
+      box.appendChild(rmVideoBtn);
+    }
+    if (r.qImgSize) {
+      const rmImgBtn = document.createElement('button');
+      rmImgBtn.className = 'remove-q';
+      rmImgBtn.style.marginLeft = '12px';
+      rmImgBtn.textContent = 'Remove question figure (' + mb(r.qImgSize) + ' MB)';
+      rmImgBtn.onclick = () => {
+        r.q.questionImage = null;
+        pendingTopicChanges = true;
+        saveDraft();
+        renderStorageReport();
+      };
+      box.appendChild(rmImgBtn);
+    }
+    if (r.explImgSize) {
+      const rmExplBtn = document.createElement('button');
+      rmExplBtn.className = 'remove-q';
+      rmExplBtn.style.marginLeft = '12px';
+      rmExplBtn.textContent = 'Remove explanation image (' + mb(r.explImgSize) + ' MB)';
+      rmExplBtn.onclick = () => {
+        r.q.explanationImage = null;
+        pendingTopicChanges = true;
+        saveDraft();
+        renderStorageReport();
+      };
+      box.appendChild(rmExplBtn);
+    }
+    verifyDetail.appendChild(box);
+  });
 }
 
 function toggleSubtopicDetail(subtopic, rowEl, subjectName){
@@ -543,6 +644,70 @@ deleteTopicBtn.addEventListener('click', () => {
 // ---------- Source buttons ----------
 cameraBtn.addEventListener('click', () => cameraInput.click());
 filesBtn.addEventListener('click', () => filesInput.click());
+
+// ---------- Voice to Text (dictate a question by speaking) ----------
+// Uses the browser's built-in speech recognition - unlike OCR/PDF reading,
+// this needs an internet connection (it's not a bundled offline library).
+// Typing and photo/file upload both still work exactly as before regardless.
+const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognizer = null;
+let isDictating = false;
+
+if (!SpeechRecognitionAPI) {
+  dictateBtn.addEventListener('click', () => {
+    setStatus('Voice-to-text isn\'t supported on this browser/device. Try Chrome on Android or a desktop, or just type the question directly below.', 'error');
+  });
+} else {
+  dictateBtn.addEventListener('click', () => {
+    if (isDictating) {
+      recognizer.stop();
+      return;
+    }
+    recognizer = new SpeechRecognitionAPI();
+    recognizer.lang = 'en-IN';
+    recognizer.continuous = true;
+    recognizer.interimResults = false;
+
+    recognizer.onstart = () => {
+      isDictating = true;
+      dictateBtnLabel.textContent = '⏹ Stop Dictating';
+      dictateBtn.style.background = '#FBEAEA';
+      rawSection.classList.remove('hidden');
+      setStatus('Listening... speak the question, options, and answer clearly. Tap "Stop Dictating" when done.', 'ok');
+    };
+
+    recognizer.onresult = (event) => {
+      let finalText = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) finalText += event.results[i][0].transcript + ' ';
+      }
+      if (finalText.trim()) {
+        accumulatedText += (accumulatedText ? '\n' : '') + finalText.trim();
+        rawText.value = accumulatedText;
+      }
+    };
+
+    recognizer.onerror = (event) => {
+      if (event.error === 'not-allowed') {
+        setStatus('Microphone access denied - check your browser/device permissions and try again.', 'error');
+      } else if (event.error !== 'no-speech') {
+        setStatus('Voice-to-text error: ' + event.error, 'error');
+      }
+    };
+
+    recognizer.onend = () => {
+      isDictating = false;
+      dictateBtnLabel.textContent = 'Dictate a Question';
+      dictateBtn.style.background = '';
+      if (accumulatedText) {
+        setStatus('Dictation stopped. Review the text below, edit anything misheard, then tap "Split into Questions".', 'ok');
+      }
+    };
+
+    recognizer.start();
+  });
+}
+
 cameraInput.addEventListener('change', () => {
   if (cameraInput.files.length) handleFile(cameraInput.files[0]);
   cameraInput.value = '';
@@ -722,6 +887,7 @@ function parseBlock(block){
     questionImage: null, // base64 data URI - the figure/diagram belonging to the question itself
     videoUrl: '',
     videoFile: null, // base64 data URI of an uploaded video clip, alternative to a link
+    audioFile: null, // base64 data URI of a recorded/uploaded audio explanation
     videoReady: false, // teacher must explicitly tick this before students see any video prompt/link
     explanation: '',
     explanationImage: null // base64 data URI, set via the attach-file control below
@@ -1035,6 +1201,129 @@ function buildQuestionCard(q, opts){
   videoReadyHint.textContent = 'Leave unticked to publish now with just the text explanation - students see no video option at all, in any case, until you come back and tick this.';
   box.appendChild(videoReadyHint);
 
+  // ---- Audio explanation: record your voice directly, or upload a clip.
+  // Unlike video, there's no separate "ready" tick - once recorded/attached,
+  // it's immediately visible to students, since recording happens live and
+  // doesn't need a separate production step the way video often does. ----
+  const audioLabel = document.createElement('label');
+  audioLabel.className = 'row-label';
+  audioLabel.style.marginTop = '10px';
+  audioLabel.textContent = 'Audio Explanation (optional) - record your voice, or upload a clip';
+  box.appendChild(audioLabel);
+
+  const audioControlsRow = document.createElement('div');
+  audioControlsRow.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;';
+
+  const recordBtn = document.createElement('button');
+  recordBtn.type = 'button';
+  recordBtn.className = 'btn btn-secondary';
+  recordBtn.style.fontSize = '13px';
+  recordBtn.textContent = '🎙 Record Audio';
+
+  const audioFileBtn = document.createElement('button');
+  audioFileBtn.type = 'button';
+  audioFileBtn.className = 'btn btn-secondary';
+  audioFileBtn.style.fontSize = '13px';
+  audioFileBtn.textContent = '📁 Upload Audio File';
+  const audioFileInput = document.createElement('input');
+  audioFileInput.type = 'file';
+  audioFileInput.accept = 'audio/*';
+  audioFileInput.style.display = 'none';
+
+  audioControlsRow.appendChild(recordBtn);
+  audioControlsRow.appendChild(audioFileBtn);
+  audioControlsRow.appendChild(audioFileInput);
+  box.appendChild(audioControlsRow);
+
+  const audioPreview = document.createElement('div');
+  audioPreview.style.marginTop = '4px';
+  function renderAudioPreview(){
+    audioPreview.innerHTML = '';
+    if (q.audioFile) {
+      const aud = document.createElement('audio');
+      aud.src = q.audioFile;
+      aud.controls = true;
+      aud.style.cssText = 'width:100%;max-width:280px;display:block;margin-bottom:6px;';
+      audioPreview.appendChild(aud);
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'remove-q';
+      rm.textContent = 'Remove audio explanation';
+      rm.onclick = () => { q.audioFile = null; renderAudioPreview(); if (opts.onChange) opts.onChange(); };
+      audioPreview.appendChild(rm);
+    }
+  }
+  renderAudioPreview();
+  box.appendChild(audioPreview);
+
+  audioFileBtn.onclick = () => audioFileInput.click();
+  audioFileInput.onchange = () => {
+    const file = audioFileInput.files[0];
+    if (!file) return;
+    const sizeMB = file.size / (1024 * 1024);
+    if (sizeMB > 5) {
+      setStatus(`That audio clip is ${sizeMB.toFixed(1)} MB - please keep audio explanations under 5 MB (a few minutes of compressed voice is usually well under this).`, 'error');
+      audioFileInput.value = '';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      q.audioFile = reader.result;
+      renderAudioPreview();
+      if (opts.onChange) opts.onChange();
+    };
+    reader.readAsDataURL(file);
+    audioFileInput.value = '';
+  };
+
+  // Live in-app recording via the microphone, using MediaRecorder.
+  let mediaRecorder = null;
+  let recordedChunks = [];
+  let recordStartTime = null;
+  let recordTimerInterval = null;
+  recordBtn.onclick = async () => {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      mediaRecorder.stop();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordedChunks = [];
+      mediaRecorder = new MediaRecorder(stream);
+      mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
+      mediaRecorder.onstop = () => {
+        clearInterval(recordTimerInterval);
+        recordBtn.textContent = '🎙 Record Audio';
+        recordBtn.style.background = '';
+        stream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+        const sizeMB = blob.size / (1024 * 1024);
+        if (sizeMB > 5) {
+          setStatus(`That recording is ${sizeMB.toFixed(1)} MB - a bit long. Please keep audio explanations under 5 MB (try recording a shorter, more focused explanation).`, 'error');
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => {
+          q.audioFile = reader.result;
+          renderAudioPreview();
+          if (opts.onChange) opts.onChange();
+          setStatus('Audio explanation recorded.', 'ok');
+        };
+        reader.readAsDataURL(blob);
+      };
+      mediaRecorder.start();
+      recordStartTime = Date.now();
+      recordBtn.style.background = 'var(--wrong)';
+      recordBtn.style.color = '#fff';
+      recordTimerInterval = setInterval(() => {
+        const secs = Math.floor((Date.now() - recordStartTime) / 1000);
+        recordBtn.textContent = `⏹ Stop Recording (${secs}s)`;
+      }, 500);
+    } catch (err) {
+      setStatus('Could not access microphone - check your browser/device permissions.', 'error');
+    }
+  };
+
   // ---- Explanation (descriptive correct-answer reasoning, shown to
   // students whether they got the question right OR wrong) ----
   const explLabel = document.createElement('label');
@@ -1138,6 +1427,44 @@ function buildQuestionCard(q, opts){
     box.appendChild(removeBtn);
   }
 
+  // ---- Validation: checks the CURRENT live DOM state (so it stays correct
+  // even after the MCQ/Fill-in type toggle rebuilds the answer fields),
+  // highlights exactly which field is the problem, and returns a plain-
+  // English description of each issue found for this question. ----
+  box.validate = function(labelText){
+    const issues = [];
+    box.querySelectorAll('.field-error').forEach(el => el.classList.remove('field-error'));
+
+    if (!q.question || !q.question.trim()) {
+      qTextArea.classList.add('field-error');
+      issues.push(`${labelText}: the question text is empty`);
+    }
+
+    if (q.type === 'mcq') {
+      const optInputs = answerArea.querySelectorAll('.opt-grid input');
+      const letters = ['A', 'B', 'C', 'D'];
+      optInputs.forEach((inp, idx) => {
+        if (!inp.value.trim()) {
+          inp.classList.add('field-error');
+          issues.push(`${labelText}: Option ${letters[idx]} is empty`);
+        }
+      });
+      const correctSel = answerArea.querySelector('select');
+      if (correctSel && (q.correctIndex === null || q.correctIndex === undefined)) {
+        correctSel.classList.add('field-error');
+        issues.push(`${labelText}: no correct option selected`);
+      }
+    } else {
+      const ansInp = answerArea.querySelector('input');
+      if (!q.correctAnswer || !q.correctAnswer.trim()) {
+        if (ansInp) ansInp.classList.add('field-error');
+        issues.push(`${labelText}: correct answer is empty`);
+      }
+    }
+
+    return issues;
+  };
+
   return box;
 }
 
@@ -1186,6 +1513,7 @@ function mergeIntoData(){
       videoUrl: q.videoUrl || 'PASTE_VIDEO_LINK_HERE',
       videoFile: q.videoFile || null,
       videoReady: !!q.videoReady,
+      audioFile: q.audioFile || null,
       explanation: q.explanation || '',
       explanationImage: q.explanationImage || null
     });
@@ -1195,7 +1523,49 @@ function mergeIntoData(){
 }
 
 // ---------- Download (offline fallback, same as v5) ----------
+// Runs validate() on every currently-visible freshly-parsed question card
+// (Tab 1) before Download/Publish proceeds. Highlights every bad field in
+// place and shows exactly what's wrong, per question, in one popup -
+// instead of silently skipping incomplete questions or a vague error.
+function validateAllQuestionCards(){
+  const cards = questionsSection.querySelectorAll('.qblock');
+  const allIssues = [];
+  let firstBadCard = null;
+  cards.forEach((card, i) => {
+    if (typeof card.validate !== 'function') return;
+    const issues = card.validate(`Question ${i + 1}`);
+    if (issues.length) {
+      allIssues.push(...issues);
+      if (!firstBadCard) firstBadCard = card;
+    }
+  });
+  if (allIssues.length) {
+    if (firstBadCard) firstBadCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    showPublishError(
+      `Found ${allIssues.length} issue(s) before publishing - the exact field(s) are now outlined in red below:\n\n` +
+      allIssues.map(i => '• ' + i).join('\n')
+    );
+    return false;
+  }
+  return true;
+}
+
+function countAllQuestions(data){
+  let total = 0;
+  data.subjects.forEach(subj => subj.subtopics.forEach(subt => {
+    total += (subt.levels['1'] || []).length + (subt.levels['2'] || []).length;
+  }));
+  return total;
+}
+
+function countSubtopicQuestions(subj, subtopicName){
+  const subt = subj.subtopics.find(s => s.name === subtopicName);
+  if (!subt) return 0;
+  return (subt.levels['1'] || []).length + (subt.levels['2'] || []).length;
+}
+
 downloadBtn.addEventListener('click', () => {
+  if (!validateAllQuestionCards()) return;
   const { addedCount, subtopicName, level } = mergeIntoData();
   const blob = new Blob([JSON.stringify(DATA, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -1206,8 +1576,39 @@ downloadBtn.addEventListener('click', () => {
   URL.revokeObjectURL(url);
   const topicNote = pendingTopicChanges ? ' New topic(s) included.' : '';
   pendingTopicChanges = false;
+  showQuestionCountSummary(addedCount, subtopicName, level, 'Downloaded');
   setStatus(`Added ${addedCount} question(s) to ${subtopicName} (Level ${level}).${topicNote} Downloaded questions.json - replace the file in data/ manually via GitHub.`, 'ok');
 });
+
+// A clear, hard-to-miss confirmation of exactly how many questions were
+// just added, what position they now hold in the topic, and the running
+// totals for the topic and the whole question bank.
+function showQuestionCountSummary(addedCount, subtopicName, level, actionLabel){
+  if (addedCount === 0) return; // nothing new was added (e.g. only a topic edit) - no count to show
+  const subj = DATA.subjects.find(s => s.subtopics.some(st => st.name === subtopicName));
+  const topicTotal = subj ? countSubtopicQuestions(subj, subtopicName) : null;
+  const grandTotal = countAllQuestions(DATA);
+  const firstNum = topicTotal !== null ? topicTotal - addedCount + 1 : null;
+  const rangeText = addedCount === 1
+    ? (firstNum !== null ? `now question #${firstNum}` : '')
+    : (firstNum !== null ? `now questions #${firstNum}-#${firstNum + addedCount - 1}` : '');
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal';
+  overlay.innerHTML = `
+    <div class="modal-box" style="border-top:3px solid var(--correct);max-width:420px;">
+      <h2 style="color:var(--correct);">${actionLabel}!</h2>
+      <p style="color:var(--text);font-size:15px;line-height:1.6;">
+        <strong>${addedCount}</strong> new question(s) added${rangeText ? ' (' + rangeText + ' in Level ' + level + ')' : ''}.<br><br>
+        <strong>${subtopicName}</strong> now has <strong>${topicTotal ?? '?'}</strong> question(s) total.<br>
+        Your whole question bank now has <strong>${grandTotal}</strong> question(s) across all topics.
+      </p>
+      <button class="btn btn-primary full-width" id="dismissCountSummary">Got it</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#dismissCountSummary').onclick = () => overlay.remove();
+}
 
 // ---------- Publish directly to GitHub ----------
 publishBtn.addEventListener('click', async () => {
@@ -1218,6 +1619,8 @@ publishBtn.addEventListener('click', async () => {
     settingsChev.textContent = '▲';
     return;
   }
+
+  if (!validateAllQuestionCards()) return;
 
   const { addedCount, subtopicName, level } = mergeIntoData();
   if (addedCount === 0 && !pendingTopicChanges) {
@@ -1234,11 +1637,15 @@ publishBtn.addEventListener('click', async () => {
   const sizeBytes = new Blob([contentStr]).size;
   const sizeMB = sizeBytes / (1024 * 1024);
   if (sizeBytes > 900000) {
+    const websiteNote = sizeMB > 25
+      ? `Your file is ${sizeMB.toFixed(2)} MB, which is also too big for GitHub's website upload (25 MB limit) - you'll need to shrink it first using the Storage Report before either option below will work.`
+      : `1) Tap "Download File" below, then on github.com go to your repo → data folder → click questions.json → the pencil (edit) icon → replace the content → Commit. GitHub's website accepts files up to 25 MB this way.`;
     showPublishError(
       `Can't publish automatically - your question bank is now ${sizeMB.toFixed(2)} MB, over GitHub's ~1 MB limit for this kind of update (this is a GitHub limit, not an app bug).\n\n` +
-      `This is almost always caused by an uploaded video file or several images. Fix it one of two ways:\n\n` +
-      `1) Tap "Download File" below, then on github.com go to your repo → data folder → click questions.json → the pencil (edit) icon → replace the content → Commit. GitHub's website accepts files up to 25 MB this way.\n\n` +
-      `2) Or remove the heaviest uploaded video (use a YouTube/Drive Link instead, which barely adds any size) and try Publish again.`
+      `This is almost always caused by an uploaded video file or several images.\n\n` +
+      `Fastest fix: go to "2. Verify Uploaded Data" → tap "🔍 Show Storage Report" - it lists your heaviest questions first, with a one-tap button to remove each uploaded video/image. Removing the biggest one or two usually solves this immediately.\n\n` +
+      `${websiteNote}\n\n` +
+      `Either way, replace uploaded videos with a YouTube/Drive Link where you can - a link barely adds any size at all.`
     );
     return;
   }
@@ -1285,6 +1692,7 @@ publishBtn.addEventListener('click', async () => {
 
     const topicNote = pendingTopicChanges ? ' New topic(s) published too.' : '';
     setStatus(`Published! Added ${addedCount} question(s) to ${subtopicName} (Level ${level}).${topicNote} Students will see it after GitHub Pages rebuilds (~1-2 min).`, 'ok');
+    showQuestionCountSummary(addedCount, subtopicName, level, 'Published');
     clearDraft(); // successfully published - no need to keep the local safety-net copy
     parsedQuestions = [];
     questionsSection.innerHTML = '';
