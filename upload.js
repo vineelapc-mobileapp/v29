@@ -1,6 +1,29 @@
 import * as pdfjsLib from './libs/pdfjs/pdf.min.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './libs/pdfjs/pdf.worker.min.mjs';
 
+// Firebase is loaded ON DEMAND (dynamic import), not as a static top-level
+// import. A static import is fatal if it fails to load (offline, network
+// hiccup, blocked) - it would take down the ENTIRE Teacher Upload app,
+// even for teachers who never touch Media Storage. Loading it lazily,
+// only when actually needed, means everything else keeps working exactly
+// as before if Firebase can't be reached for any reason.
+let firebaseModules = null;
+async function loadFirebaseSDK(){
+  if (firebaseModules) return firebaseModules;
+  const [{ initializeApp }, authMod, storageMod] = await Promise.all([
+    import('https://www.gstatic.com/firebasejs/12.17.1/firebase-app.js'),
+    import('https://www.gstatic.com/firebasejs/12.17.1/firebase-auth.js'),
+    import('https://www.gstatic.com/firebasejs/12.17.1/firebase-storage.js')
+  ]);
+  firebaseModules = { initializeApp, ...authMod, ...storageMod };
+  return firebaseModules;
+}
+
+let firebaseApp = null;
+let firebaseAuth = null;
+let firebaseStorage = null;
+let firebaseSignedIn = false;
+
 let DATA = null;
 
 const subjectSelect = document.getElementById('subjectSelect');
@@ -30,6 +53,22 @@ const ghBranch = document.getElementById('ghBranch');
 const ghPath = document.getElementById('ghPath');
 const ghToken = document.getElementById('ghToken');
 const saveSettingsBtn = document.getElementById('saveSettingsBtn');
+
+const fbBadge = document.getElementById('fbBadge');
+const fbApiKey = document.getElementById('fbApiKey');
+const fbAuthDomain = document.getElementById('fbAuthDomain');
+const fbProjectId = document.getElementById('fbProjectId');
+const fbStorageBucket = document.getElementById('fbStorageBucket');
+const fbSenderId = document.getElementById('fbSenderId');
+const fbAppId = document.getElementById('fbAppId');
+const fbEmail = document.getElementById('fbEmail');
+const fbPassword = document.getElementById('fbPassword');
+const saveFirebaseBtn = document.getElementById('saveFirebaseBtn');
+
+const cldBadge = document.getElementById('cldBadge');
+const cldCloudName = document.getElementById('cldCloudName');
+const cldPreset = document.getElementById('cldPreset');
+const saveCloudinaryBtn = document.getElementById('saveCloudinaryBtn');
 
 const teacherTabSelect = document.getElementById('teacherTabSelect');
 const tab1Panel = document.getElementById('tab1Panel');
@@ -141,6 +180,19 @@ function renderVerifyTab(){
 // Sorts every question across every subject/subtopic by its embedded size
 // (uploaded video + images), biggest first - the fastest way to find what's
 // actually causing a large file, rather than checking topic-by-topic.
+// Converts an already-embedded base64 data URI (from an existing question)
+// into a Blob, so it can be uploaded to Firebase without needing the
+// teacher to re-select the original file - the data is already right here.
+function dataUriToBlob(dataUri){
+  const [header, base64] = dataUri.split(',');
+  const mimeMatch = header.match(/data:([^;]+);base64/);
+  const mime = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
 function renderStorageReport(){
   const rows = [];
   DATA.subjects.forEach(subj => {
@@ -151,7 +203,10 @@ function renderStorageReport(){
           const qImgSize = q.questionImage ? new Blob([q.questionImage]).size : 0;
           const explImgSize = q.explanationImage ? new Blob([q.explanationImage]).size : 0;
           const total = videoSize + qImgSize + explImgSize;
-          if (total > 0) rows.push({ subj, subt, level, q, videoSize, qImgSize, explImgSize, total });
+          // Only count genuinely embedded media (not a short Firebase URL
+          // left behind after migration) - a Firebase download link is a
+          // couple hundred bytes at most, nowhere near worth flagging.
+          if (total > 10240) rows.push({ subj, subt, level, q, videoSize, qImgSize, explImgSize, total });
         });
       });
     });
@@ -162,8 +217,32 @@ function renderStorageReport(){
   verifyDetail.innerHTML = '';
   const header = document.createElement('div');
   header.className = 'settings-panel';
-  header.innerHTML = `<h3>Storage Report</h3><div class="hint" style="margin-bottom:0;">${rows.length} question(s) with attached media, heaviest first. Remove or replace with a Link to shrink the file fast.</div>`;
+  const migrateHint = (cloudinaryConfigured || firebaseSignedIn)
+    ? 'Media Storage is connected - use "Move to Media Storage" on any item below to shrink questions.json without losing the file.'
+    : 'Connect Media Storage above (Publish Settings) to move these already-uploaded files there instead of just removing them.';
+  header.innerHTML = `<h3>Storage Report</h3><div class="hint" style="margin-bottom:0;">${rows.length} question(s) with attached media, heaviest first. ${migrateHint}</div>`;
   verifyDetail.appendChild(header);
+
+  if ((cloudinaryConfigured || firebaseSignedIn) && rows.length > 0) {
+    const migrateAllBtn = document.createElement('button');
+    migrateAllBtn.className = 'btn btn-secondary full-width';
+    migrateAllBtn.style.marginBottom = '14px';
+    migrateAllBtn.textContent = `📦 Move all ${rows.length} item(s) to Media Storage`;
+    migrateAllBtn.onclick = async () => {
+      migrateAllBtn.disabled = true;
+      let done = 0;
+      for (const r of rows) {
+        migrateAllBtn.textContent = `Moving ${done + 1} of ${rows.length}...`;
+        await migrateAllMediaForRow(r);
+        done++;
+      }
+      pendingTopicChanges = true;
+      saveDraft();
+      setStatus(`Moved ${done} question(s)' media to Media Storage.`, 'ok');
+      renderStorageReport();
+    };
+    verifyDetail.appendChild(migrateAllBtn);
+  }
 
   if (rows.length === 0) {
     const empty = document.createElement('div');
@@ -187,6 +266,30 @@ function renderStorageReport(){
       <div style="font-size:13px;color:var(--muted);margin-bottom:10px;">${parts.join('<br>')}</div>
     `;
     if (r.videoSize) {
+      const btnRow = document.createElement('div');
+      btnRow.style.marginBottom = '6px';
+      if (cloudinaryConfigured || firebaseSignedIn) {
+        const moveBtn = document.createElement('button');
+        moveBtn.className = 'btn btn-secondary';
+        moveBtn.style.cssText = 'font-size:12px;padding:6px 10px;margin-right:8px;';
+        moveBtn.textContent = '📦 Move to Media Storage';
+        moveBtn.onclick = async () => {
+          moveBtn.disabled = true;
+          moveBtn.textContent = 'Uploading...';
+          try {
+            r.q.videoFile = await uploadMedia(dataUriToBlob(r.q.videoFile), 'videos', `migrated_${r.q.id || Date.now()}.webm`);
+            pendingTopicChanges = true;
+            saveDraft();
+            setStatus('Video moved to Media Storage.', 'ok');
+            renderStorageReport();
+          } catch (err) {
+            setStatus('Move failed: ' + err.message, 'error');
+            moveBtn.disabled = false;
+            moveBtn.textContent = '📦 Move to Media Storage';
+          }
+        };
+        btnRow.appendChild(moveBtn);
+      }
       const rmVideoBtn = document.createElement('button');
       rmVideoBtn.className = 'remove-q';
       rmVideoBtn.textContent = 'Remove this uploaded video (' + mb(r.videoSize) + ' MB)';
@@ -197,12 +300,36 @@ function renderStorageReport(){
         renderStorageReport();
         setStatus('Removed uploaded video. Consider pasting a YouTube/Drive link instead - it barely adds any size.', 'ok');
       };
-      box.appendChild(rmVideoBtn);
+      btnRow.appendChild(rmVideoBtn);
+      box.appendChild(btnRow);
     }
     if (r.qImgSize) {
+      const btnRow2 = document.createElement('div');
+      btnRow2.style.marginBottom = '6px';
+      if (cloudinaryConfigured || firebaseSignedIn) {
+        const moveImgBtn = document.createElement('button');
+        moveImgBtn.className = 'btn btn-secondary';
+        moveImgBtn.style.cssText = 'font-size:12px;padding:6px 10px;margin-right:8px;';
+        moveImgBtn.textContent = '📦 Move to Media Storage';
+        moveImgBtn.onclick = async () => {
+          moveImgBtn.disabled = true;
+          moveImgBtn.textContent = 'Uploading...';
+          try {
+            r.q.questionImage = await uploadMedia(dataUriToBlob(r.q.questionImage), 'question-figures', `migrated_${r.q.id || Date.now()}.jpg`);
+            pendingTopicChanges = true;
+            saveDraft();
+            setStatus('Figure moved to Media Storage.', 'ok');
+            renderStorageReport();
+          } catch (err) {
+            setStatus('Move failed: ' + err.message, 'error');
+            moveImgBtn.disabled = false;
+            moveImgBtn.textContent = '📦 Move to Media Storage';
+          }
+        };
+        btnRow2.appendChild(moveImgBtn);
+      }
       const rmImgBtn = document.createElement('button');
       rmImgBtn.className = 'remove-q';
-      rmImgBtn.style.marginLeft = '12px';
       rmImgBtn.textContent = 'Remove question figure (' + mb(r.qImgSize) + ' MB)';
       rmImgBtn.onclick = () => {
         r.q.questionImage = null;
@@ -210,12 +337,35 @@ function renderStorageReport(){
         saveDraft();
         renderStorageReport();
       };
-      box.appendChild(rmImgBtn);
+      btnRow2.appendChild(rmImgBtn);
+      box.appendChild(btnRow2);
     }
     if (r.explImgSize) {
+      const btnRow3 = document.createElement('div');
+      if (cloudinaryConfigured || firebaseSignedIn) {
+        const moveExplBtn = document.createElement('button');
+        moveExplBtn.className = 'btn btn-secondary';
+        moveExplBtn.style.cssText = 'font-size:12px;padding:6px 10px;margin-right:8px;';
+        moveExplBtn.textContent = '📦 Move to Media Storage';
+        moveExplBtn.onclick = async () => {
+          moveExplBtn.disabled = true;
+          moveExplBtn.textContent = 'Uploading...';
+          try {
+            r.q.explanationImage = await uploadMedia(dataUriToBlob(r.q.explanationImage), 'explanation-images', `migrated_${r.q.id || Date.now()}.jpg`);
+            pendingTopicChanges = true;
+            saveDraft();
+            setStatus('Explanation image moved to Media Storage.', 'ok');
+            renderStorageReport();
+          } catch (err) {
+            setStatus('Move failed: ' + err.message, 'error');
+            moveExplBtn.disabled = false;
+            moveExplBtn.textContent = '📦 Move to Media Storage';
+          }
+        };
+        btnRow3.appendChild(moveExplBtn);
+      }
       const rmExplBtn = document.createElement('button');
       rmExplBtn.className = 'remove-q';
-      rmExplBtn.style.marginLeft = '12px';
       rmExplBtn.textContent = 'Remove explanation image (' + mb(r.explImgSize) + ' MB)';
       rmExplBtn.onclick = () => {
         r.q.explanationImage = null;
@@ -223,11 +373,31 @@ function renderStorageReport(){
         saveDraft();
         renderStorageReport();
       };
-      box.appendChild(rmExplBtn);
+      btnRow3.appendChild(rmExplBtn);
+      box.appendChild(btnRow3);
     }
     verifyDetail.appendChild(box);
   });
 }
+
+// Used by the "Move all" bulk button - migrates every media field present
+// on a single row's question, one at a time.
+async function migrateAllMediaForRow(r){
+  try {
+    if (r.videoSize) {
+      r.q.videoFile = await uploadMedia(dataUriToBlob(r.q.videoFile), 'videos', `migrated_${r.q.id || Date.now()}.webm`);
+    }
+    if (r.qImgSize) {
+      r.q.questionImage = await uploadMedia(dataUriToBlob(r.q.questionImage), 'question-figures', `migrated_${r.q.id || Date.now()}.jpg`);
+    }
+    if (r.explImgSize) {
+      r.q.explanationImage = await uploadMedia(dataUriToBlob(r.q.explanationImage), 'explanation-images', `migrated_${r.q.id || Date.now()}.jpg`);
+    }
+  } catch (err) {
+    console.error('Migration failed for a question:', err);
+  }
+}
+
 
 function toggleSubtopicDetail(subtopic, rowEl, subjectName){
   if (verifyDetail.dataset.openFor === subtopic.id) {
@@ -548,6 +718,183 @@ saveSettingsBtn.addEventListener('click', () => {
   setStatus('Publish settings saved on this device.', 'ok');
 });
 
+// ---------- Firebase Media Storage settings (stored only on this device) ----------
+const FB_SETTINGS_KEY = 'eeePracticeFirebaseSettings';
+
+function loadFirebaseSettings(){
+  try {
+    const raw = localStorage.getItem(FB_SETTINGS_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch { return null; }
+}
+function saveFirebaseSettings(s){
+  localStorage.setItem(FB_SETTINGS_KEY, JSON.stringify(s));
+}
+function applyFirebaseSettingsToForm(s){
+  if (!s) return;
+  fbApiKey.value = s.apiKey || '';
+  fbAuthDomain.value = s.authDomain || '';
+  fbProjectId.value = s.projectId || '';
+  fbStorageBucket.value = s.storageBucket || '';
+  fbSenderId.value = s.messagingSenderId || '';
+  fbAppId.value = s.appId || '';
+  fbEmail.value = s.email || '';
+  // Password intentionally not re-displayed, same privacy margin as the GitHub token.
+}
+function updateFbBadge(text, connected){
+  fbBadge.textContent = text;
+  fbBadge.className = 'publish-status-badge ' + (connected ? 'connected' : 'not-connected');
+}
+
+async function initFirebaseAndSignIn(s, silent){
+  try {
+    const fb = await loadFirebaseSDK();
+    firebaseApp = fb.initializeApp({
+      apiKey: s.apiKey,
+      authDomain: s.authDomain,
+      projectId: s.projectId,
+      storageBucket: s.storageBucket,
+      messagingSenderId: s.messagingSenderId,
+      appId: s.appId
+    });
+    firebaseAuth = fb.getAuth(firebaseApp);
+    firebaseStorage = fb.getStorage(firebaseApp);
+    await fb.signInWithEmailAndPassword(firebaseAuth, s.email, s.password);
+    firebaseSignedIn = true;
+    updateFbBadge(`Connected as ${s.email}`, true);
+    if (!silent) setStatus('Media Storage connected - video/audio/image uploads will now go here instead of being embedded.', 'ok');
+  } catch (err) {
+    firebaseSignedIn = false;
+    updateFbBadge('Not connected', false);
+    if (!silent) setStatus('Media Storage sign-in failed: ' + err.message, 'error');
+  }
+}
+
+const existingFb = loadFirebaseSettings();
+applyFirebaseSettingsToForm(existingFb);
+if (existingFb && existingFb.password) {
+  initFirebaseAndSignIn(existingFb, true); // quietly reconnect using the saved password
+} else {
+  updateFbBadge('Not connected', false);
+}
+
+// ---------- Cloudinary Media Storage (alternative to Firebase - no credit
+// card ever needed, uses an "unsigned upload preset" so no secret key has
+// to live in this client-side code) ----------
+const CLD_SETTINGS_KEY = 'eeePracticeCloudinarySettings';
+let cloudinaryConfigured = false;
+let cloudinaryCloudName = '';
+let cloudinaryPreset = '';
+
+function loadCloudinarySettings(){
+  try {
+    const raw = localStorage.getItem(CLD_SETTINGS_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+function saveCloudinarySettings(s){
+  localStorage.setItem(CLD_SETTINGS_KEY, JSON.stringify(s));
+}
+function updateCldBadge(text, connected){
+  cldBadge.textContent = text;
+  cldBadge.className = 'publish-status-badge ' + (connected ? 'connected' : 'not-connected');
+}
+
+const existingCld = loadCloudinarySettings();
+if (existingCld && existingCld.cloudName && existingCld.preset) {
+  cldCloudName.value = existingCld.cloudName;
+  cldPreset.value = existingCld.preset;
+  cloudinaryCloudName = existingCld.cloudName;
+  cloudinaryPreset = existingCld.preset;
+  cloudinaryConfigured = true;
+  updateCldBadge(`Connected (${existingCld.cloudName})`, true);
+} else {
+  updateCldBadge('Not connected', false);
+}
+
+saveCloudinaryBtn.addEventListener('click', () => {
+  const cloudName = cldCloudName.value.trim();
+  const preset = cldPreset.value.trim();
+  if (!cloudName || !preset) {
+    setStatus('Fill in both Cloud Name and Upload Preset before saving.', 'error');
+    return;
+  }
+  saveCloudinarySettings({ cloudName, preset });
+  cloudinaryCloudName = cloudName;
+  cloudinaryPreset = preset;
+  cloudinaryConfigured = true;
+  updateCldBadge(`Connected (${cloudName})`, true);
+  setStatus('Cloudinary connected - video/audio/image uploads will now go here (checked before Firebase).', 'ok');
+});
+
+// Uploads a File or Blob to Cloudinary via a plain unsigned upload request -
+// no SDK, no login, no secret key in this code. Returns the resulting
+// public URL, same shape as uploadToFirebase, so callers don't need to
+// know which service actually handled it.
+async function uploadToCloudinary(blob, filename){
+  const form = new FormData();
+  form.append('file', blob, filename);
+  form.append('upload_preset', cloudinaryPreset);
+  const res = await fetch(`https://api.cloudinary.com/v1_1/${cloudinaryCloudName}/auto/upload`, {
+    method: 'POST',
+    body: form
+  });
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Cloudinary upload failed (HTTP ${res.status}). ${errBody.slice(0, 200)}`);
+  }
+  const json = await res.json();
+  return json.secure_url;
+}
+
+// Single entry point every media-attach handler calls - tries Cloudinary
+// first (if connected), then Firebase (if signed in), then returns null so
+// the caller falls back to embedding the file locally as before.
+async function uploadMedia(blob, folder, filename){
+  if (cloudinaryConfigured) {
+    return await uploadToCloudinary(blob, filename);
+  }
+  if (firebaseSignedIn) {
+    return await uploadToFirebase(blob, folder, filename);
+  }
+  return null;
+}
+
+saveFirebaseBtn.addEventListener('click', async () => {
+  const prev = loadFirebaseSettings() || {};
+  const s = {
+    apiKey: fbApiKey.value.trim(),
+    authDomain: fbAuthDomain.value.trim(),
+    projectId: fbProjectId.value.trim(),
+    storageBucket: fbStorageBucket.value.trim(),
+    messagingSenderId: fbSenderId.value.trim(),
+    appId: fbAppId.value.trim(),
+    email: fbEmail.value.trim(),
+    password: fbPassword.value.trim() || prev.password || ''
+  };
+  if (!s.apiKey || !s.projectId || !s.storageBucket || !s.email || !s.password) {
+    setStatus('Fill in all Media Storage fields (API Key, Project ID, Storage Bucket, Email, Password) before saving.', 'error');
+    return;
+  }
+  saveFirebaseSettings(s);
+  fbPassword.value = '';
+  updateFbBadge('Connecting...', false);
+  await initFirebaseAndSignIn(s, false);
+});
+
+// Uploads a File (or a Blob, for recorded audio) to Firebase Storage and
+// returns its public download URL. Used by every "attach media" control
+// once Media Storage is connected - falls back to local embedding (the
+// old behavior) if it isn't.
+async function uploadToFirebase(blob, folder, filename){
+  const fb = await loadFirebaseSDK();
+  const path = `${folder}/${Date.now()}_${filename.replace(/[^a-z0-9._-]/gi, '_')}`;
+  const storageRef = fb.ref(firebaseStorage, path);
+  await fb.uploadBytes(storageRef, blob);
+  return await fb.getDownloadURL(storageRef);
+}
+
 // ---------- Load existing question bank ----------
 fetch('data/questions.json')
   .then(r => r.json())
@@ -819,12 +1166,13 @@ splitBtn.addEventListener('click', () => {
   const text = rawText.value;
   const blocks = splitIntoBlocks(text);
   parsedQuestions = blocks.map(parseBlock);
-  // Obvious case: exactly one photo was used and it produced exactly one
-  // question - that photo is almost certainly this question's figure, so
-  // attach it automatically (teacher can still remove it with one tap).
-  if (pendingSourceImages.length === 1 && parsedQuestions.length === 1) {
-    parsedQuestions[0].questionImage = pendingSourceImages[0].dataUrl;
-  }
+  // NOTE: the source photo is no longer auto-attached as the question's
+  // figure by default (even in the single-photo/single-question case).
+  // Attaching it made sense for genuine diagrams, but for a plain-text
+  // photographed question it just duplicated the same content twice -
+  // once as an image, once as the typed-out text. Teachers can still
+  // attach it with one tap via the quick-attach thumbnail when there
+  // really is a diagram worth keeping.
   renderQuestionBlocks();
   updateExportBarVisibility();
 });
@@ -1026,12 +1374,24 @@ function buildQuestionCard(q, opts){
   }
   renderQImagePreview();
   qImageBtn.onclick = () => qImageInput.click();
-  qImageInput.onchange = () => {
+  qImageInput.onchange = async () => {
     const file = qImageInput.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => { q.questionImage = reader.result; renderQImagePreview(); if (opts.onChange) opts.onChange(); };
-    reader.readAsDataURL(file);
+    if (cloudinaryConfigured || firebaseSignedIn) {
+      setStatus('Uploading figure to Media Storage...');
+      try {
+        q.questionImage = await uploadMedia(file, 'question-figures', file.name);
+        renderQImagePreview();
+        if (opts.onChange) opts.onChange();
+        setStatus('Figure uploaded.', 'ok');
+      } catch (err) {
+        setStatus('Upload failed: ' + err.message, 'error');
+      }
+    } else {
+      const reader = new FileReader();
+      reader.onload = () => { q.questionImage = reader.result; renderQImagePreview(); if (opts.onChange) opts.onChange(); };
+      reader.readAsDataURL(file);
+    }
     qImageInput.value = '';
   };
   qImageRow.appendChild(qImageBtn);
@@ -1130,7 +1490,9 @@ function buildQuestionCard(q, opts){
   videoFileBtn.type = 'button';
   videoFileBtn.className = 'btn btn-secondary';
   videoFileBtn.style.cssText = 'font-size:13px;padding:8px 12px;width:100%;';
-  videoFileBtn.textContent = '🎬 Upload Video File (short clips, under 15 MB)';
+  videoFileBtn.textContent = (cloudinaryConfigured || firebaseSignedIn)
+    ? '🎬 Upload Video File (up to 200 MB - Media Storage connected)'
+    : '🎬 Upload Video File (short clips, under 15 MB)';
   const videoFileInput = document.createElement('input');
   videoFileInput.type = 'file';
   videoFileInput.accept = 'video/*';
@@ -1155,12 +1517,34 @@ function buildQuestionCard(q, opts){
   }
   renderVideoFilePreview();
   videoFileBtn.onclick = () => videoFileInput.click();
-  videoFileInput.onchange = () => {
+  videoFileInput.onchange = async () => {
     const file = videoFileInput.files[0];
     if (!file) return;
     const sizeMB = file.size / (1024 * 1024);
+
+    if (cloudinaryConfigured || firebaseSignedIn) {
+      // Media Storage removes the size pressure entirely - a generous cap
+      // just to keep individual uploads reasonable.
+      if (sizeMB > 200) {
+        setStatus(`That video is ${sizeMB.toFixed(1)} MB - please keep individual uploads under 200 MB even with Media Storage connected.`, 'error');
+        videoFileInput.value = '';
+        return;
+      }
+      setStatus(`Uploading video (${sizeMB.toFixed(1)} MB) to Media Storage...`);
+      try {
+        q.videoFile = await uploadMedia(file, 'videos', file.name);
+        renderVideoFilePreview();
+        if (opts.onChange) opts.onChange();
+        setStatus('Video uploaded to Media Storage - questions.json only stores a small link to it.', 'ok');
+      } catch (err) {
+        setStatus('Upload failed: ' + err.message, 'error');
+      }
+      videoFileInput.value = '';
+      return;
+    }
+
     if (sizeMB > 15) {
-      setStatus(`That video is ${sizeMB.toFixed(1)} MB - too large to embed directly (limit ~15 MB, since every student re-downloads this with the question bank). Use a Video Link (YouTube/Drive) for anything longer than a minute or two instead.`, 'error');
+      setStatus(`That video is ${sizeMB.toFixed(1)} MB - too large to embed directly (limit ~15 MB, since every student re-downloads this with the question bank). Connect Media Storage above (Publish Settings) for larger videos, or use a Video Link (YouTube/Drive) for anything longer than a minute or two.`, 'error');
       videoFileInput.value = '';
       return;
     }
@@ -1257,12 +1641,32 @@ function buildQuestionCard(q, opts){
   box.appendChild(audioPreview);
 
   audioFileBtn.onclick = () => audioFileInput.click();
-  audioFileInput.onchange = () => {
+  audioFileInput.onchange = async () => {
     const file = audioFileInput.files[0];
     if (!file) return;
     const sizeMB = file.size / (1024 * 1024);
+
+    if (cloudinaryConfigured || firebaseSignedIn) {
+      if (sizeMB > 50) {
+        setStatus(`That audio clip is ${sizeMB.toFixed(1)} MB - please keep individual uploads under 50 MB even with Media Storage connected.`, 'error');
+        audioFileInput.value = '';
+        return;
+      }
+      setStatus(`Uploading audio (${sizeMB.toFixed(1)} MB) to Media Storage...`);
+      try {
+        q.audioFile = await uploadMedia(file, 'audio', file.name);
+        renderAudioPreview();
+        if (opts.onChange) opts.onChange();
+        setStatus('Audio uploaded to Media Storage.', 'ok');
+      } catch (err) {
+        setStatus('Upload failed: ' + err.message, 'error');
+      }
+      audioFileInput.value = '';
+      return;
+    }
+
     if (sizeMB > 5) {
-      setStatus(`That audio clip is ${sizeMB.toFixed(1)} MB - please keep audio explanations under 5 MB (a few minutes of compressed voice is usually well under this).`, 'error');
+      setStatus(`That audio clip is ${sizeMB.toFixed(1)} MB - please keep audio explanations under 5 MB (a few minutes of compressed voice is usually well under this), or connect Media Storage above for larger clips.`, 'error');
       audioFileInput.value = '';
       return;
     }
@@ -1291,15 +1695,33 @@ function buildQuestionCard(q, opts){
       recordedChunks = [];
       mediaRecorder = new MediaRecorder(stream);
       mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
-      mediaRecorder.onstop = () => {
+      mediaRecorder.onstop = async () => {
         clearInterval(recordTimerInterval);
         recordBtn.textContent = '🎙 Record Audio';
         recordBtn.style.background = '';
         stream.getTracks().forEach(t => t.stop());
         const blob = new Blob(recordedChunks, { type: 'audio/webm' });
         const sizeMB = blob.size / (1024 * 1024);
+
+        if (cloudinaryConfigured || firebaseSignedIn) {
+          if (sizeMB > 50) {
+            setStatus(`That recording is ${sizeMB.toFixed(1)} MB - please keep individual recordings under 50 MB even with Media Storage connected.`, 'error');
+            return;
+          }
+          setStatus(`Uploading recording (${sizeMB.toFixed(1)} MB) to Media Storage...`);
+          try {
+            q.audioFile = await uploadMedia(blob, 'audio', `recording_${q.id || 'new'}.webm`);
+            renderAudioPreview();
+            if (opts.onChange) opts.onChange();
+            setStatus('Audio recorded and uploaded to Media Storage.', 'ok');
+          } catch (err) {
+            setStatus('Upload failed: ' + err.message, 'error');
+          }
+          return;
+        }
+
         if (sizeMB > 5) {
-          setStatus(`That recording is ${sizeMB.toFixed(1)} MB - a bit long. Please keep audio explanations under 5 MB (try recording a shorter, more focused explanation).`, 'error');
+          setStatus(`That recording is ${sizeMB.toFixed(1)} MB - a bit long. Please keep audio explanations under 5 MB (try recording a shorter explanation, or connect Media Storage above for longer recordings).`, 'error');
           return;
         }
         const reader = new FileReader();
@@ -1404,9 +1826,15 @@ function buildQuestionCard(q, opts){
         explTextarea.value = q.explanation;
         setStatus('Explanation text added from PDF.', 'ok');
       } else if (['jpg','jpeg','png'].includes(ext) || file.type.startsWith('image/')) {
-        const reader = new FileReader();
-        reader.onload = () => { q.explanationImage = reader.result; renderAttachPreview(); if (opts.onChange) opts.onChange(); };
-        reader.readAsDataURL(file);
+        if (cloudinaryConfigured || firebaseSignedIn) {
+          setStatus('Uploading image to Media Storage...');
+          q.explanationImage = await uploadMedia(file, 'explanation-images', file.name);
+          renderAttachPreview();
+        } else {
+          const reader = new FileReader();
+          reader.onload = () => { q.explanationImage = reader.result; renderAttachPreview(); if (opts.onChange) opts.onChange(); };
+          reader.readAsDataURL(file);
+        }
       }
       if (opts.onChange) opts.onChange();
     } catch (err) {
