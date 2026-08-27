@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Teacher Upload - EEE Practice</title>
+<title>Teacher Upload - EEE Practice by BALAJI Sir</title>
 <meta name="theme-color" content="#e65100">
 <link rel="manifest" href="manifest-upload.json">
 <link rel="apple-touch-icon" href="icons/icon-teacher-192.png">
@@ -129,6 +129,70 @@ textarea.raw-text{
       <label>Personal Access Token</label>
       <input type="password" id="ghToken" placeholder="github_pat_...">
       <button id="saveSettingsBtn" class="btn btn-secondary full-width" style="margin-top:10px;">Save Settings</button>
+    </div>
+
+    <div class="settings-panel">
+      <h3>Connect to Media Storage (Firebase)</h3>
+      <div class="hint">Optional, but recommended once your question bank grows. Videos, audio, and images upload here instead of being embedded directly in questions.json - keeps your published file small and avoids GitHub's ~1 MB Publish limit entirely. Your login stays only on this device.</div>
+      <span id="fbBadge" class="publish-status-badge not-connected">Not connected</span>
+      <div class="field-row">
+        <div class="field-col">
+          <label>Firebase API Key</label>
+          <input type="text" id="fbApiKey" placeholder="AIzaSy...">
+        </div>
+        <div class="field-col">
+          <label>Auth Domain</label>
+          <input type="text" id="fbAuthDomain" placeholder="your-project.firebaseapp.com">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field-col">
+          <label>Project ID</label>
+          <input type="text" id="fbProjectId" placeholder="your-project-id">
+        </div>
+        <div class="field-col">
+          <label>Storage Bucket</label>
+          <input type="text" id="fbStorageBucket" placeholder="your-project.appspot.com">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field-col">
+          <label>Messaging Sender ID</label>
+          <input type="text" id="fbSenderId" placeholder="123456789">
+        </div>
+        <div class="field-col">
+          <label>App ID</label>
+          <input type="text" id="fbAppId" placeholder="1:123456789:web:abc123">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field-col">
+          <label>Teacher Email (the one you added in Firebase Auth)</label>
+          <input type="text" id="fbEmail" placeholder="you@example.com">
+        </div>
+        <div class="field-col">
+          <label>Teacher Password</label>
+          <input type="password" id="fbPassword" placeholder="Password">
+        </div>
+      </div>
+      <button id="saveFirebaseBtn" class="btn btn-secondary full-width" style="margin-top:10px;">Save &amp; Sign In</button>
+    </div>
+
+    <div class="settings-panel">
+      <h3>Connect to Media Storage (Cloudinary)</h3>
+      <div class="hint">Alternative to Firebase above - no credit card needed, ever. Free plan gives 25 GB/month combined storage+bandwidth. If both this and Firebase are connected, Cloudinary is used first.</div>
+      <span id="cldBadge" class="publish-status-badge not-connected">Not connected</span>
+      <div class="field-row">
+        <div class="field-col">
+          <label>Cloud Name</label>
+          <input type="text" id="cldCloudName" placeholder="e.g. dxyz1234">
+        </div>
+        <div class="field-col">
+          <label>Upload Preset (unsigned)</label>
+          <input type="text" id="cldPreset" placeholder="e.g. eee_practice_uploads">
+        </div>
+      </div>
+      <button id="saveCloudinaryBtn" class="btn btn-secondary full-width" style="margin-top:10px;">Save</button>
     </div>
   </div>
 
@@ -269,6 +333,13 @@ textarea.raw-text{
 <script>
 // PIN gate: nothing in #appContent is usable until this passes.
 const PIN_KEY = 'eeeTeacherPin';
+const SETUP_CODE_HASH = '00f5f79cb3e6dd959358738a0b4c6706712a006c572f35eabbf5f4a4a56be484';
+
+async function sha256Hex(str){
+  const enc = new TextEncoder().encode(str);
+  const buf = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
 const lockOverlay = document.getElementById('lockOverlay');
 const appContent = document.getElementById('appContent');
 const pinInput = document.getElementById('pinInput');
@@ -279,14 +350,42 @@ const lockHint = document.getElementById('lockHint');
 
 const storedPin = localStorage.getItem(PIN_KEY);
 const isFirstTime = !storedPin;
+// Two-stage first-time flow: a brand new device must first prove it knows
+// the shared Setup Code (known only to you) before it's allowed to choose
+// its own PIN. Without this, ANY new device - including a student's own
+// phone visiting upload.html for the first time - would be treated as
+// "first time setup" and could just invent its own PIN with zero barrier.
+let setupCodeVerified = false;
 if (isFirstTime) {
-  lockTitle.textContent = 'Set a Teacher PIN';
-  lockHint.textContent = 'First time here — choose a 4+ digit PIN to protect this page.';
+  lockTitle.textContent = 'Teacher Setup Code Required';
+  lockHint.textContent = 'This device hasn\'t been set up yet. Enter the Teacher Setup Code first (ask whoever manages this app if you don\'t have it).';
+  pinInput.type = 'text';
+  pinInput.maxLength = 20;
+  pinInput.placeholder = 'Setup Code';
 }
 
-function tryUnlock(){
+async function tryUnlock(){
   const val = pinInput.value.trim();
-  if (isFirstTime) {
+  if (isFirstTime && !setupCodeVerified) {
+    pinSubmitBtn.disabled = true;
+    const hash = await sha256Hex(val.toUpperCase());
+    pinSubmitBtn.disabled = false;
+    if (hash === SETUP_CODE_HASH) {
+      setupCodeVerified = true;
+      pinInput.value = '';
+      pinInput.type = 'password';
+      pinInput.maxLength = 8;
+      pinInput.placeholder = 'PIN';
+      lockTitle.textContent = 'Set a Teacher PIN';
+      lockHint.textContent = 'Setup code accepted. Now choose a 4+ digit PIN for this device.';
+      pinError.textContent = '';
+    } else {
+      pinError.textContent = 'Incorrect Setup Code.';
+      pinInput.value = '';
+    }
+    return;
+  }
+  if (isFirstTime && setupCodeVerified) {
     if (val.length < 4) {
       pinError.textContent = 'Use at least 4 digits.';
       return;
